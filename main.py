@@ -6,7 +6,7 @@ import logging
 import os
 import sqlite3
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterable
 from uuid import uuid4
@@ -52,8 +52,10 @@ def _parse_admin_ids(value: str | None) -> set[int]:
 class Settings:
     bot_token: str = os.getenv("TELEGRAM_BOT_TOKEN", os.getenv("BOT_TOKEN", "")).strip()
     openai_api_key: str = os.getenv("OPENAI_API_KEY", "").strip()
-    admin_ids: set[int] = _parse_admin_ids(
-        os.getenv("ADMIN_IDS") or os.getenv("ADMIN_USER_ID") or ""
+    admin_ids: set[int] = field(
+        default_factory=lambda: _parse_admin_ids(
+            os.getenv("ADMIN_IDS") or os.getenv("ADMIN_USER_ID") or ""
+        )
     )
     log_level: str = os.getenv("LOG_LEVEL", "INFO").strip()
 
@@ -152,12 +154,7 @@ def style_picker_kb(mode: str) -> InlineKeyboardMarkup:
     rows = []
     for style in STYLE_PRESETS.values():
         rows.append(
-            [
-                InlineKeyboardButton(
-                    text=f"✨ {style.title}",
-                    callback_data=f"style:{mode}:{style.code}",
-                )
-            ]
+            [InlineKeyboardButton(text=f"✨ {style.title}", callback_data=f"style:{mode}:{style.code}")]
         )
     rows.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="back:menu")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
@@ -364,7 +361,7 @@ class OpenAIImageService:
         with open(path, "rb") as f:
             return base64.b64encode(f.read()).decode("utf-8")
 
-    async def stylize_person(self, image_path: str | Path, style_code: str, extra_request: str | None = None) -> bytes:
+    async def stylize_person(self, image_path: str | Path, style_code: str) -> bytes:
         style = STYLE_PRESETS[style_code]
         base64_image = self._encode_image(image_path)
         prompt = (
@@ -375,15 +372,12 @@ class OpenAIImageService:
             "You may change background, outfit styling, pose refinement, lighting, and scene mood, but the person must still look like the original person. "
             "Output one high-quality polished image."
         )
-        if extra_request:
-            prompt += f" Extra user request: {extra_request.strip()}."
         return await asyncio.to_thread(self._responses_image_call, [base64_image], prompt)
 
     async def merge_two_people(
         self,
         image_paths: Iterable[str | Path],
         style_code: str,
-        extra_request: str | None = None,
     ) -> bytes:
         style = STYLE_PRESETS[style_code]
         encoded = [self._encode_image(p) for p in image_paths]
@@ -394,8 +388,6 @@ class OpenAIImageService:
             f"{style.prompt_fragment} "
             "The result must look premium, social-media ready, and coherent as one image."
         )
-        if extra_request:
-            prompt += f" Extra user request: {extra_request.strip()}."
         return await asyncio.to_thread(self._responses_image_call, encoded, prompt)
 
     def _responses_image_call(self, base64_images: list[str], prompt: str) -> bytes:
@@ -460,6 +452,11 @@ def ensure_user_from_message(message: Message) -> None:
     db.ensure_user(user.id, user.username, user.full_name)
 
 
+def ensure_user_from_callback(call: CallbackQuery) -> None:
+    user = call.from_user
+    db.ensure_user(user.id, user.username, user.full_name)
+
+
 def cabinet_text(user_id: int) -> str:
     user = db.get_user(user_id)
     if not user:
@@ -474,7 +471,7 @@ def cabinet_text(user_id: int) -> str:
     )
 
 
-async def send_main(message: Message | CallbackQuery) -> None:
+async def send_main(target: Message | CallbackQuery) -> None:
     text = (
         "🔥 AI Photo Style Bot\n\n"
         "Что умеет:\n"
@@ -484,12 +481,13 @@ async def send_main(message: Message | CallbackQuery) -> None:
         "• объединить 2 фото в 1 кадр\n\n"
         f"У нового пользователя {settings.free_generations} бесплатные генерации."
     )
-    if isinstance(message, Message):
-        await message.answer(text, reply_markup=main_menu_kb())
+    if isinstance(target, Message):
+        await target.answer(text, reply_markup=main_menu_kb())
     else:
-        if message.message:
-            await message.message.edit_text(text, reply_markup=main_menu_kb())
-        await message.answer()
+        ensure_user_from_callback(target)
+        if target.message:
+            await target.message.edit_text(text, reply_markup=main_menu_kb())
+        await target.answer()
 
 
 async def save_largest_photo(bot: Bot, message: Message, filename_prefix: str) -> str:
@@ -588,6 +586,7 @@ async def back_menu(call: CallbackQuery, state: FSMContext) -> None:
 
 @router.callback_query(F.data == "show:styles")
 async def show_styles(call: CallbackQuery) -> None:
+    ensure_user_from_callback(call)
     if call.message:
         await call.message.edit_text(style_text(), reply_markup=main_menu_kb())
     await call.answer()
@@ -595,6 +594,7 @@ async def show_styles(call: CallbackQuery) -> None:
 
 @router.callback_query(F.data == "show:cabinet")
 async def show_cabinet(call: CallbackQuery) -> None:
+    ensure_user_from_callback(call)
     if call.message:
         await call.message.edit_text(cabinet_text(call.from_user.id), reply_markup=main_menu_kb())
     await call.answer()
@@ -602,6 +602,7 @@ async def show_cabinet(call: CallbackQuery) -> None:
 
 @router.callback_query(F.data == "buy:menu")
 async def buy_menu(call: CallbackQuery) -> None:
+    ensure_user_from_callback(call)
     if call.message:
         await call.message.edit_text("Выберите пакет:", reply_markup=buy_kb())
     await call.answer()
@@ -609,6 +610,7 @@ async def buy_menu(call: CallbackQuery) -> None:
 
 @router.callback_query(F.data.startswith("mode:"))
 async def choose_mode(call: CallbackQuery) -> None:
+    ensure_user_from_callback(call)
     mode = call.data.split(":", 1)[1]
     if call.message:
         await call.message.edit_text("Выберите стиль:", reply_markup=style_picker_kb(mode))
@@ -617,6 +619,7 @@ async def choose_mode(call: CallbackQuery) -> None:
 
 @router.callback_query(F.data.startswith("style:"))
 async def choose_style(call: CallbackQuery, state: FSMContext) -> None:
+    ensure_user_from_callback(call)
     _, mode, style_code = call.data.split(":", 2)
     if style_code not in STYLE_PRESETS:
         await call.answer("Стиль не найден", show_alert=True)
@@ -725,6 +728,7 @@ async def wrong_content(message: Message) -> None:
 
 @router.callback_query(F.data.startswith("invoice:"))
 async def send_invoice_handler(call: CallbackQuery) -> None:
+    ensure_user_from_callback(call)
     package = call.data.split(":", 1)[1]
     if package not in PAYLOADS:
         await call.answer("Пакет не найден", show_alert=True)
