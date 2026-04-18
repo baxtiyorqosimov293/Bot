@@ -721,7 +721,9 @@ async def duo_photo_2(message: Message, state: FSMContext, bot: Bot) -> None:
     await process_generation(message, state, [path1, path2])
 
 
-@router.message((Flow.waiting_single_photo | Flow.waiting_duo_photo_1 | Flow.waiting_duo_photo_2))
+@router.message(Flow.waiting_single_photo)
+@router.message(Flow.waiting_duo_photo_1)
+@router.message(Flow.waiting_duo_photo_2)
 async def wrong_content(message: Message) -> None:
     await message.answer("Нужно отправить именно фото.")
 
