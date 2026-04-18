@@ -8,7 +8,7 @@ import sqlite3
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Iterable
 from uuid import uuid4
 
 from aiogram import Bot, Dispatcher, F, Router
@@ -22,9 +22,11 @@ from aiogram.types import (
     FSInputFile,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
+    KeyboardButton,
     LabeledPrice,
     Message,
     PreCheckoutQuery,
+    ReplyKeyboardMarkup,
 )
 from dotenv import load_dotenv
 from openai import OpenAI
@@ -33,8 +35,7 @@ load_dotenv()
 
 
 def _env_int(name: str, default: int) -> int:
-    value = os.getenv(name, str(default)).strip()
-    return int(value)
+    return int(os.getenv(name, str(default)).strip())
 
 
 def _parse_admin_ids(value: str | None) -> set[int]:
@@ -50,7 +51,7 @@ def _parse_admin_ids(value: str | None) -> set[int]:
 
 @dataclass(frozen=True)
 class Settings:
-    bot_token: str = os.getenv("TELEGRAM_BOT_TOKEN", os.getenv("BOT_TOKEN", "")).strip()
+    bot_token: str = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
     openai_api_key: str = os.getenv("OPENAI_API_KEY", "").strip()
     admin_ids: set[int] = field(
         default_factory=lambda: _parse_admin_ids(
@@ -59,18 +60,20 @@ class Settings:
     )
     log_level: str = os.getenv("LOG_LEVEL", "INFO").strip()
 
-    free_generations: int = _env_int("FREE_TRIALS", _env_int("FREE_GENERATIONS", 3))
+    free_generations: int = _env_int("FREE_TRIALS", 3)
 
-    single_generation_stars: int = _env_int("PRICE_SINGLE_XTR", _env_int("SINGLE_GENERATION_STARS", 45))
-    month_plan_stars: int = _env_int("PRICE_MONTH_XTR", _env_int("MONTH_PLAN_STARS", 299))
-    year_plan_stars: int = _env_int("PRICE_YEAR_XTR", _env_int("YEAR_PLAN_STARS", 1999))
+    single_generation_stars: int = _env_int("PRICE_SINGLE_XTR", 45)
+    month_plan_stars: int = _env_int("PRICE_MONTH_XTR", 299)
+    year_plan_stars: int = _env_int("PRICE_YEAR_XTR", 1999)
 
-    month_plan_credits: int = _env_int("MONTH_LIMIT", _env_int("MONTH_PLAN_CREDITS", 40))
-    year_plan_credits: int = _env_int("YEAR_LIMIT", _env_int("YEAR_PLAN_CREDITS", 400))
+    month_plan_credits: int = _env_int("MONTH_LIMIT", 40)
+    year_plan_credits: int = _env_int("YEAR_LIMIT", 400)
 
-    openai_model: str = os.getenv("OPENAI_IMAGE_MODEL", os.getenv("OPENAI_MODEL", "gpt-image-1")).strip()
-    openai_quality: str = os.getenv("OPENAI_QUALITY", "high").strip()
-    openai_size: str = os.getenv("OPENAI_SIZE", "1024x1024").strip()
+    image_model: str = os.getenv("OPENAI_IMAGE_MODEL", "gpt-image-1.5").strip()
+    input_fidelity: str = os.getenv("OPENAI_INPUT_FIDELITY", "high").strip()
+    output_format: str = os.getenv("OPENAI_OUTPUT_FORMAT", "jpeg").strip()
+    output_compression: int = _env_int("OPENAI_OUTPUT_COMPRESSION", 95)
+    size: str = os.getenv("OPENAI_SIZE", "1024x1024").strip()
 
     db_path: str = os.getenv("DB_PATH", "/var/data/bot.db").strip()
     temp_dir: str = os.getenv("TEMP_DIR", "tmp").strip()
@@ -89,7 +92,7 @@ logging.basicConfig(
     level=getattr(logging, settings.log_level.upper(), logging.INFO),
     format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
 )
-logger = logging.getLogger("photo_bot")
+logger = logging.getLogger("azibax_photo_bot")
 
 
 @dataclass(frozen=True)
@@ -104,35 +107,35 @@ STYLE_PRESETS: dict[str, StylePreset] = {
     "classic": StylePreset(
         code="classic",
         title="Classic Studio",
-        description="Чистый премиальный студийный портрет: свет, дорогой образ, натуральная кожа.",
+        description="Чистый премиальный студийный портрет.",
         prompt_fragment=(
-            "Create a clean premium studio portrait with soft cinematic lighting, tasteful elegant wardrobe, "
-            "natural skin texture, premium editorial feel, and an Instagram-ready polished result."
+            "Create a premium studio portrait with clean elegant styling, natural skin texture, "
+            "soft flattering light, polished editorial composition, and subtle luxury feel."
         ),
     ),
     "anime": StylePreset(
         code="anime",
         title="Anime Cinematic",
-        description="Аниме-стиль с кинематографичным светом, но лицо должно остаться узнаваемым.",
+        description="Аниме-стиль с сохранением лица.",
         prompt_fragment=(
-            "Transform the scene into a cinematic anime-inspired portrait with beautiful lighting, dynamic atmosphere, "
-            "detailed outfit styling and polished composition, while keeping the real person recognizable and preserving key facial identity traits."
+            "Transform the photo into a cinematic anime-inspired portrait with rich atmosphere, "
+            "beautiful light, stylish outfit adaptation, and high detail while keeping the real person's face recognizable."
         ),
     ),
     "dubai": StylePreset(
         code="dubai",
         title="Dubai Luxe",
-        description="Dubai / old money / luxury aesthetic: дорого, статусно, premium fashion.",
+        description="Luxury / Dubai / old money aesthetic.",
         prompt_fragment=(
-            "Create a luxury Dubai old-money aesthetic portrait with premium fashion styling, refined elegant pose, "
-            "upscale background, sophisticated editorial lighting, and aspirational Instagram aesthetics."
+            "Create a luxury Dubai old-money portrait with premium fashion styling, elegant pose, "
+            "high-end background, aspirational social-media look, and refined editorial lighting."
         ),
     ),
 }
 
 
 def style_text() -> str:
-    lines = ["Доступные стили:"]
+    lines = ["Доступные стили:\n"]
     for preset in STYLE_PRESETS.values():
         lines.append(f"• {preset.title} — {preset.description}")
     return "\n".join(lines)
@@ -163,11 +166,38 @@ def style_picker_kb(mode: str) -> InlineKeyboardMarkup:
 def buy_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text="⚡ 1 generation", callback_data="invoice:single")],
+            [InlineKeyboardButton(text="⚡ 1 генерация", callback_data="invoice:single")],
             [InlineKeyboardButton(text="📅 Month Pro", callback_data="invoice:month")],
             [InlineKeyboardButton(text="🏆 Year Pro", callback_data="invoice:year")],
             [InlineKeyboardButton(text="⬅️ Назад", callback_data="back:menu")],
         ]
+    )
+
+
+def home_reply_kb() -> ReplyKeyboardMarkup:
+    return ReplyKeyboardMarkup(
+        keyboard=[
+            [
+                KeyboardButton(text="🖼 Отправить фото"),
+                KeyboardButton(text="🎨 Стили"),
+            ],
+            [
+                KeyboardButton(text="✨ Создать фото"),
+                KeyboardButton(text="💳 Купить кредиты"),
+            ],
+            [
+                KeyboardButton(text="⚡ 1 генерация"),
+                KeyboardButton(text="📅 Month Pro"),
+                KeyboardButton(text="🏆 Year Pro"),
+            ],
+            [
+                KeyboardButton(text="👥 Рефералка"),
+                KeyboardButton(text="💰 Баланс"),
+                KeyboardButton(text="🔥 Идеи"),
+            ],
+        ],
+        resize_keyboard=True,
+        input_field_placeholder="Выбери действие 👇",
     )
 
 
@@ -185,8 +215,7 @@ class UserRecord:
 class Database:
     def __init__(self, path: str) -> None:
         self.path = path
-        parent = Path(path).parent
-        parent.mkdir(parents=True, exist_ok=True)
+        Path(path).parent.mkdir(parents=True, exist_ok=True)
         self.init_db()
 
     @contextmanager
@@ -224,8 +253,7 @@ class Database:
                     credits_added INTEGER NOT NULL,
                     telegram_payment_charge_id TEXT UNIQUE,
                     provider_payment_charge_id TEXT,
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    FOREIGN KEY (user_id) REFERENCES users(user_id)
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 );
                 """
             )
@@ -246,38 +274,39 @@ class Database:
     def get_user(self, user_id: int) -> UserRecord | None:
         with self.connect() as conn:
             row = conn.execute(
-                "SELECT user_id, username, full_name, free_used, paid_credits, total_paid_stars, total_generations FROM users WHERE user_id=?",
+                """
+                SELECT user_id, username, full_name, free_used, paid_credits,
+                       total_paid_stars, total_generations
+                FROM users
+                WHERE user_id=?
+                """,
                 (user_id,),
             ).fetchone()
-            if not row:
-                return None
-            return UserRecord(**dict(row))
+            return UserRecord(**dict(row)) if row else None
 
-    def can_generate(self, user_id: int, free_limit: int) -> bool:
+    def can_generate(self, user_id: int) -> bool:
         user = self.get_user(user_id)
-        if not user:
-            return False
-        return user.free_used < free_limit or user.paid_credits > 0
+        return bool(user and (user.free_used < settings.free_generations or user.paid_credits > 0))
 
-    def consume_generation(self, user_id: int, free_limit: int) -> str:
+    def consume_generation(self, user_id: int) -> str:
         with self.connect() as conn:
-            user = conn.execute(
+            row = conn.execute(
                 "SELECT free_used, paid_credits FROM users WHERE user_id=?",
                 (user_id,),
             ).fetchone()
-            if not user:
+            if not row:
                 raise RuntimeError("Пользователь не найден")
 
-            if user["free_used"] < free_limit:
+            if row["free_used"] < settings.free_generations:
                 conn.execute(
-                    "UPDATE users SET free_used = free_used + 1, total_generations = total_generations + 1 WHERE user_id=?",
+                    "UPDATE users SET free_used=free_used+1, total_generations=total_generations+1 WHERE user_id=?",
                     (user_id,),
                 )
                 return "free"
 
-            if user["paid_credits"] > 0:
+            if row["paid_credits"] > 0:
                 conn.execute(
-                    "UPDATE users SET paid_credits = paid_credits - 1, total_generations = total_generations + 1 WHERE user_id=?",
+                    "UPDATE users SET paid_credits=paid_credits-1, total_generations=total_generations+1 WHERE user_id=?",
                     (user_id,),
                 )
                 return "paid"
@@ -288,16 +317,22 @@ class Database:
         with self.connect() as conn:
             if source == "free":
                 conn.execute(
-                    "UPDATE users SET free_used = CASE WHEN free_used > 0 THEN free_used - 1 ELSE 0 END, "
-                    "total_generations = CASE WHEN total_generations > 0 THEN total_generations - 1 ELSE 0 END "
-                    "WHERE user_id=?",
+                    """
+                    UPDATE users
+                    SET free_used = CASE WHEN free_used > 0 THEN free_used - 1 ELSE 0 END,
+                        total_generations = CASE WHEN total_generations > 0 THEN total_generations - 1 ELSE 0 END
+                    WHERE user_id=?
+                    """,
                     (user_id,),
                 )
-            elif source == "paid":
+            else:
                 conn.execute(
-                    "UPDATE users SET paid_credits = paid_credits + 1, "
-                    "total_generations = CASE WHEN total_generations > 0 THEN total_generations - 1 ELSE 0 END "
-                    "WHERE user_id=?",
+                    """
+                    UPDATE users
+                    SET paid_credits = paid_credits + 1,
+                        total_generations = CASE WHEN total_generations > 0 THEN total_generations - 1 ELSE 0 END
+                    WHERE user_id=?
+                    """,
                     (user_id,),
                 )
 
@@ -322,7 +357,8 @@ class Database:
             conn.execute(
                 """
                 INSERT INTO payments (
-                    user_id, payload, stars, credits_added, telegram_payment_charge_id, provider_payment_charge_id
+                    user_id, payload, stars, credits_added,
+                    telegram_payment_charge_id, provider_payment_charge_id
                 )
                 VALUES (?, ?, ?, ?, ?, ?)
                 """,
@@ -336,82 +372,83 @@ class Database:
                 ),
             )
             conn.execute(
-                "UPDATE users SET paid_credits = paid_credits + ?, total_paid_stars = total_paid_stars + ? WHERE user_id=?",
+                """
+                UPDATE users
+                SET paid_credits=paid_credits+?,
+                    total_paid_stars=total_paid_stars+?
+                WHERE user_id=?
+                """,
                 (credits_added, stars, user_id),
             )
             return True
 
     def stats(self) -> dict[str, int]:
         with self.connect() as conn:
-            users = conn.execute("SELECT COUNT(*) AS c FROM users").fetchone()["c"]
-            generations = conn.execute("SELECT COALESCE(SUM(total_generations), 0) AS c FROM users").fetchone()["c"]
-            paid_stars = conn.execute("SELECT COALESCE(SUM(total_paid_stars), 0) AS c FROM users").fetchone()["c"]
-            return {"users": users, "generations": generations, "paid_stars": paid_stars}
+            return {
+                "users": conn.execute("SELECT COUNT(*) AS c FROM users").fetchone()["c"],
+                "generations": conn.execute(
+                    "SELECT COALESCE(SUM(total_generations),0) AS c FROM users"
+                ).fetchone()["c"],
+                "paid_stars": conn.execute(
+                    "SELECT COALESCE(SUM(total_paid_stars),0) AS c FROM users"
+                ).fetchone()["c"],
+            }
 
 
 class OpenAIImageService:
-    def __init__(self, api_key: str, model: str, quality: str, size: str) -> None:
-        self.client = OpenAI(api_key=api_key)
-        self.model = model
-        self.quality = quality
-        self.size = size
+    def __init__(self) -> None:
+        self.client = OpenAI(api_key=settings.openai_api_key)
 
-    @staticmethod
-    def _encode_image(path: str | Path) -> str:
-        with open(path, "rb") as f:
-            return base64.b64encode(f.read()).decode("utf-8")
+    def _edit_images(self, image_paths: list[str], prompt: str) -> bytes:
+        files = [open(path, "rb") for path in image_paths]
+        try:
+            response = self.client.images.edit(
+                model=settings.image_model,
+                image=files if len(files) > 1 else files[0],
+                prompt=prompt,
+                size=settings.size,
+                n=1,
+                input_fidelity=settings.input_fidelity,
+                output_format=settings.output_format,
+                output_compression=settings.output_compression,
+            )
+        finally:
+            for f in files:
+                try:
+                    f.close()
+                except Exception:
+                    pass
 
-    async def stylize_person(self, image_path: str | Path, style_code: str) -> bytes:
+        if not getattr(response, "data", None):
+            raise RuntimeError("OpenAI не вернул data в images.edit")
+
+        item = response.data[0]
+        b64_json = getattr(item, "b64_json", None)
+        if not b64_json:
+            raise RuntimeError("OpenAI не вернул b64_json")
+        return base64.b64decode(b64_json)
+
+    async def stylize_person(self, image_path: str, style_code: str) -> bytes:
         style = STYLE_PRESETS[style_code]
-        base64_image = self._encode_image(image_path)
         prompt = (
-            "Edit the uploaded portrait photo. Preserve the same person identity and keep the face highly recognizable. "
-            "Keep eye shape, nose shape, lips, face proportions, skin tone, and overall identity consistent with the original person. "
-            "Do not replace the person with a new face. Improve composition and styling while keeping the person recognizable. "
-            f"{style.prompt_fragment} "
-            "You may change background, outfit styling, pose refinement, lighting, and scene mood, but the person must still look like the original person. "
-            "Output one high-quality polished image."
+            "Edit the uploaded portrait photo. Keep the exact same person highly recognizable. "
+            "Preserve face identity, face proportions, eye shape, nose shape, lips, skin tone, and overall likeness. "
+            "Do not replace the face with a different person. "
+            "You may improve pose, outfit styling, background, lighting, and composition. "
+            f"{style.prompt_fragment}"
         )
-        return await asyncio.to_thread(self._responses_image_call, [base64_image], prompt)
+        return await asyncio.to_thread(self._edit_images, [image_path], prompt)
 
-    async def merge_two_people(
-        self,
-        image_paths: Iterable[str | Path],
-        style_code: str,
-    ) -> bytes:
+    async def merge_two_people(self, image_paths: Iterable[str], style_code: str) -> bytes:
         style = STYLE_PRESETS[style_code]
-        encoded = [self._encode_image(p) for p in image_paths]
         prompt = (
-            "Create one combined photorealistic image using the uploaded reference photos. "
-            "If there are two different people, keep both identities recognizable and faithful to their real faces. "
-            "Do not invent new faces. Make them appear naturally together in one well-composed scene with believable pose, lighting, and proportions. "
-            f"{style.prompt_fragment} "
-            "The result must look premium, social-media ready, and coherent as one image."
+            "Create one combined premium image using the uploaded reference photos. "
+            "If the photos contain two different people, keep both faces faithful and recognizable. "
+            "Do not invent new faces. "
+            "Make the final result look natural, coherent, and social-media ready. "
+            f"{style.prompt_fragment}"
         )
-        return await asyncio.to_thread(self._responses_image_call, encoded, prompt)
-
-    def _responses_image_call(self, base64_images: list[str], prompt: str) -> bytes:
-        content = [{"type": "input_text", "text": prompt}]
-        for img in base64_images:
-            content.append({"type": "input_image", "image_url": f"data:image/jpeg;base64,{img}"})
-
-        response = self.client.responses.create(
-            model="gpt-4.1",
-            input=[{"role": "user", "content": content}],
-            tools=[
-                {
-                    "type": "image_generation",
-                    "model": self.model,
-                    "quality": self.quality,
-                    "size": self.size,
-                }
-            ],
-        )
-
-        image_calls = [o for o in response.output if getattr(o, "type", "") == "image_generation_call"]
-        if not image_calls:
-            raise RuntimeError("OpenAI не вернул изображение")
-        return base64.b64decode(image_calls[0].result)
+        return await asyncio.to_thread(self._edit_images, list(image_paths), prompt)
 
 
 class Flow(StatesGroup):
@@ -422,17 +459,24 @@ class Flow(StatesGroup):
 
 Path(settings.temp_dir).mkdir(parents=True, exist_ok=True)
 db = Database(settings.db_path)
-image_service = OpenAIImageService(
-    api_key=settings.openai_api_key,
-    model=settings.openai_model,
-    quality=settings.openai_quality,
-    size=settings.openai_size,
-)
+image_service = OpenAIImageService()
 
-PAYLOADS: dict[str, dict[str, Any]] = {
-    "single": {"title": "1 generation", "stars": settings.single_generation_stars, "credits": 1},
-    "month": {"title": "Month Pro", "stars": settings.month_plan_stars, "credits": settings.month_plan_credits},
-    "year": {"title": "Year Pro", "stars": settings.year_plan_stars, "credits": settings.year_plan_credits},
+PAYLOADS: dict[str, dict[str, int | str]] = {
+    "single": {
+        "title": "1 генерация",
+        "stars": settings.single_generation_stars,
+        "credits": 1,
+    },
+    "month": {
+        "title": "Month Pro",
+        "stars": settings.month_plan_stars,
+        "credits": settings.month_plan_credits,
+    },
+    "year": {
+        "title": "Year Pro",
+        "stars": settings.year_plan_stars,
+        "credits": settings.year_plan_credits,
+    },
 }
 
 router = Router()
@@ -446,10 +490,8 @@ def get_lock(user_id: int) -> asyncio.Lock:
 
 
 def ensure_user_from_message(message: Message) -> None:
-    user = message.from_user
-    if not user:
-        return
-    db.ensure_user(user.id, user.username, user.full_name)
+    if message.from_user:
+        db.ensure_user(message.from_user.id, message.from_user.username, message.from_user.full_name)
 
 
 def ensure_user_from_callback(call: CallbackQuery) -> None:
@@ -473,26 +515,26 @@ def cabinet_text(user_id: int) -> str:
 
 async def send_main(target: Message | CallbackQuery) -> None:
     text = (
-        "🔥 AI Photo Style Bot\n\n"
-        "Что умеет:\n"
-        "• изменить фон\n"
-        "• изменить одежду и стиль\n"
-        "• сохранить лицо максимально похожим\n"
-        "• объединить 2 фото в 1 кадр\n\n"
-        f"У нового пользователя {settings.free_generations} бесплатные генерации."
+        "🔥 <b>AziBax AI Bot</b>\n\n"
+        "Что умеет бот:\n"
+        "• менять фон\n"
+        "• менять стиль одежды\n"
+        "• сохранять лицо максимально похожим\n"
+        "• объединять 2 фото в 1 кадр\n\n"
+        f"🎁 Бесплатно доступно: <b>{settings.free_generations}</b> генерации"
     )
     if isinstance(target, Message):
-        await target.answer(text, reply_markup=main_menu_kb())
+        await target.answer(text, reply_markup=home_reply_kb(), parse_mode="HTML")
     else:
         ensure_user_from_callback(target)
         if target.message:
-            await target.message.edit_text(text, reply_markup=main_menu_kb())
+            await target.message.answer(text, reply_markup=home_reply_kb(), parse_mode="HTML")
         await target.answer()
 
 
 async def save_largest_photo(bot: Bot, message: Message, filename_prefix: str) -> str:
     if not message.photo:
-        raise RuntimeError("Фото не найдено в сообщении")
+        raise RuntimeError("Фото не найдено")
     photo = message.photo[-1]
     file = await bot.get_file(photo.file_id)
     out_path = Path(settings.temp_dir) / f"{filename_prefix}_{uuid4().hex}.jpg"
@@ -527,19 +569,19 @@ async def menu_cmd(message: Message, state: FSMContext) -> None:
 @router.message(Command("styles"))
 async def styles_cmd(message: Message) -> None:
     ensure_user_from_message(message)
-    await message.answer(style_text())
+    await message.answer(style_text(), reply_markup=home_reply_kb())
 
 
 @router.message(Command("cabinet"))
 async def cabinet_cmd(message: Message) -> None:
     ensure_user_from_message(message)
-    await message.answer(cabinet_text(message.from_user.id))
+    await message.answer(cabinet_text(message.from_user.id), reply_markup=home_reply_kb())
 
 
 @router.message(Command("buy"))
 async def buy_cmd(message: Message) -> None:
     ensure_user_from_message(message)
-    await message.answer("Выберите пакет:", reply_markup=buy_kb())
+    await message.answer("Выбери пакет:", reply_markup=buy_kb())
 
 
 @router.message(Command("help"))
@@ -547,12 +589,12 @@ async def help_cmd(message: Message) -> None:
     ensure_user_from_message(message)
     await message.answer(
         "Как пользоваться:\n"
-        "1) Нажми «Один человек» или «Два человека»\n"
-        "2) Выбери стиль\n"
-        "3) Отправь фото\n"
-        "4) Получи готовый результат\n\n"
-        "Совет: лучше работает фото с хорошим светом и видимым лицом.\n"
-        "Команда /cancel отменяет текущую загрузку."
+        "1) Нажми «Создать фото» или «Отправить фото»\n"
+        "2) Выбери режим\n"
+        "3) Выбери стиль\n"
+        "4) Отправь фото\n"
+        "5) Получи результат",
+        reply_markup=home_reply_kb(),
     )
 
 
@@ -562,7 +604,7 @@ async def cancel_cmd(message: Message, state: FSMContext) -> None:
     data = await state.get_data()
     cleanup_paths([data.get("duo1")])
     await state.clear()
-    await message.answer("Текущая операция отменена.", reply_markup=main_menu_kb())
+    await message.answer("Текущая операция отменена.", reply_markup=home_reply_kb())
 
 
 @router.message(Command("admin_stats"))
@@ -573,6 +615,111 @@ async def admin_stats(message: Message) -> None:
     s = db.stats()
     await message.answer(
         f"📊 Статистика\n\nПользователи: {s['users']}\nГенерации: {s['generations']}\nОплачено Stars: {s['paid_stars']}"
+    )
+
+
+@router.message(F.text == "🖼 Отправить фото")
+@router.message(F.text == "✨ Создать фото")
+async def open_create_menu(message: Message, state: FSMContext) -> None:
+    ensure_user_from_message(message)
+    await state.clear()
+    kb = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="🧍 Один человек", callback_data="mode:single")],
+            [InlineKeyboardButton(text="🧑‍🤝‍🧑 Два человека", callback_data="mode:duo")],
+        ]
+    )
+    await message.answer("Выбери режим генерации:", reply_markup=kb)
+
+
+@router.message(F.text == "🎨 Стили")
+async def open_styles_menu(message: Message) -> None:
+    ensure_user_from_message(message)
+    await message.answer(style_text(), reply_markup=home_reply_kb())
+
+
+@router.message(F.text == "💳 Купить кредиты")
+async def open_buy_menu(message: Message) -> None:
+    ensure_user_from_message(message)
+    await message.answer("Выбери пакет:", reply_markup=buy_kb())
+
+
+@router.message(F.text == "⚡ 1 генерация")
+async def buy_single_from_button(message: Message) -> None:
+    ensure_user_from_message(message)
+    p = PAYLOADS["single"]
+    await message.bot.send_invoice(
+        chat_id=message.from_user.id,
+        title=str(p["title"]),
+        description="Пакет для AI Photo Style Bot",
+        payload="buy_single",
+        currency="XTR",
+        prices=[LabeledPrice(label=str(p["title"]), amount=int(p["stars"]))],
+        start_parameter="buy-single",
+    )
+
+
+@router.message(F.text == "📅 Month Pro")
+async def buy_month_from_button(message: Message) -> None:
+    ensure_user_from_message(message)
+    p = PAYLOADS["month"]
+    await message.bot.send_invoice(
+        chat_id=message.from_user.id,
+        title=str(p["title"]),
+        description="Пакет для AI Photo Style Bot",
+        payload="buy_month",
+        currency="XTR",
+        prices=[LabeledPrice(label=str(p["title"]), amount=int(p["stars"]))],
+        start_parameter="buy-month",
+    )
+
+
+@router.message(F.text == "🏆 Year Pro")
+async def buy_year_from_button(message: Message) -> None:
+    ensure_user_from_message(message)
+    p = PAYLOADS["year"]
+    await message.bot.send_invoice(
+        chat_id=message.from_user.id,
+        title=str(p["title"]),
+        description="Пакет для AI Photo Style Bot",
+        payload="buy_year",
+        currency="XTR",
+        prices=[LabeledPrice(label=str(p["title"]), amount=int(p["stars"]))],
+        start_parameter="buy-year",
+    )
+
+
+@router.message(F.text == "💰 Баланс")
+async def balance_from_button(message: Message) -> None:
+    ensure_user_from_message(message)
+    await message.answer(cabinet_text(message.from_user.id), reply_markup=home_reply_kb())
+
+
+@router.message(F.text == "👥 Рефералка")
+async def referral_from_button(message: Message) -> None:
+    ensure_user_from_message(message)
+    bot_info = await message.bot.get_me()
+    referral_link = f"https://t.me/{bot_info.username}?start=ref_{message.from_user.id}"
+    await message.answer(
+        "👥 Реферальная программа\n\n"
+        f"Твоя ссылка:\n{referral_link}\n\n"
+        "Потом можно добавить бонусы за приглашения.",
+        reply_markup=home_reply_kb(),
+    )
+
+
+@router.message(F.text == "🔥 Идеи")
+async def ideas_from_button(message: Message) -> None:
+    ensure_user_from_message(message)
+    await message.answer(
+        "🔥 Идеи для фото:\n\n"
+        "• Dubai Luxe portrait\n"
+        "• Old money aesthetic\n"
+        "• Anime cinematic look\n"
+        "• Luxury studio portrait\n"
+        "• Couple premium photoshoot\n"
+        "• Instagram editorial style",
+        reply_markup=home_reply_kb(),
     )
 
 
@@ -604,7 +751,7 @@ async def show_cabinet(call: CallbackQuery) -> None:
 async def buy_menu(call: CallbackQuery) -> None:
     ensure_user_from_callback(call)
     if call.message:
-        await call.message.edit_text("Выберите пакет:", reply_markup=buy_kb())
+        await call.message.edit_text("Выбери пакет:", reply_markup=buy_kb())
     await call.answer()
 
 
@@ -613,7 +760,7 @@ async def choose_mode(call: CallbackQuery) -> None:
     ensure_user_from_callback(call)
     mode = call.data.split(":", 1)[1]
     if call.message:
-        await call.message.edit_text("Выберите стиль:", reply_markup=style_picker_kb(mode))
+        await call.message.edit_text("Выбери стиль:", reply_markup=style_picker_kb(mode))
     await call.answer()
 
 
@@ -621,25 +768,26 @@ async def choose_mode(call: CallbackQuery) -> None:
 async def choose_style(call: CallbackQuery, state: FSMContext) -> None:
     ensure_user_from_callback(call)
     _, mode, style_code = call.data.split(":", 2)
+
     if style_code not in STYLE_PRESETS:
         await call.answer("Стиль не найден", show_alert=True)
         return
 
     await state.update_data(mode=mode, style=style_code)
+
     if mode == "single":
         await state.set_state(Flow.waiting_single_photo)
         if call.message:
             await call.message.edit_text(
-                f"Выбран стиль: {STYLE_PRESETS[style_code].title}\n\nОтправь 1 фото.",
-                reply_markup=None,
+                f"Выбран стиль: {STYLE_PRESETS[style_code].title}\n\nОтправь 1 фото."
             )
     else:
         await state.set_state(Flow.waiting_duo_photo_1)
         if call.message:
             await call.message.edit_text(
-                f"Выбран стиль: {STYLE_PRESETS[style_code].title}\n\nОтправь первое фото.",
-                reply_markup=None,
+                f"Выбран стиль: {STYLE_PRESETS[style_code].title}\n\nОтправь первое фото."
             )
+
     await call.answer()
 
 
@@ -647,12 +795,13 @@ async def process_generation(message: Message, state: FSMContext, paths: list[st
     ensure_user_from_message(message)
     user_id = message.from_user.id
     lock = get_lock(user_id)
+
     if lock.locked():
-        await message.answer("⏳ У тебя уже идет генерация. Дождись завершения.")
+        await message.answer("⏳ У тебя уже идёт генерация. Дождись завершения.")
         cleanup_paths(paths)
         return
 
-    if not db.can_generate(user_id, settings.free_generations):
+    if not db.can_generate(user_id):
         await message.answer(
             "Бесплатные попытки закончились. Купи пакет, чтобы продолжить.",
             reply_markup=buy_kb(),
@@ -663,7 +812,7 @@ async def process_generation(message: Message, state: FSMContext, paths: list[st
 
     data = await state.get_data()
     style = data["style"]
-    source = db.consume_generation(user_id, settings.free_generations)
+    source = db.consume_generation(user_id)
 
     async with lock:
         await message.answer("🪄 Генерирую фото... Это может занять немного времени.")
@@ -674,22 +823,35 @@ async def process_generation(message: Message, state: FSMContext, paths: list[st
             else:
                 image_bytes = await image_service.merge_two_people(paths, style)
 
-            result_path = Path(settings.temp_dir) / f"result_{user_id}_{uuid4().hex}.png"
+            result_path = Path(settings.temp_dir) / f"result_{user_id}_{uuid4().hex}.jpg"
             result_path.write_bytes(image_bytes)
+
             await message.answer_photo(
                 FSInputFile(result_path),
                 caption=(
                     f"Готово ✅\nСтиль: {STYLE_PRESETS[style].title}\n\n"
-                    f"{cabinet_text(user_id)}\n\n"
-                    "Чтобы сделать ещё — открой /menu"
+                    f"{cabinet_text(user_id)}"
                 ),
+                reply_markup=home_reply_kb(),
             )
+
         except Exception as e:
             logger.exception("Generation failed: %s", e)
             db.refund_generation(user_id, source)
+            err_text = str(e)[:800]
             await message.answer(
-                "Не удалось сгенерировать изображение. Попытка не списана. Попробуй другое фото с более четким лицом."
+                "Не удалось сгенерировать изображение.\n\n"
+                f"Техническая ошибка:\n{err_text}",
+                reply_markup=home_reply_kb(),
             )
+            for admin_id in settings.admin_ids:
+                try:
+                    await message.bot.send_message(
+                        admin_id,
+                        f"Ошибка генерации у user_id={user_id}:\n{err_text}",
+                    )
+                except Exception:
+                    pass
         finally:
             cleanup_paths(paths + ([str(result_path)] if result_path else []))
             await state.clear()
@@ -717,6 +879,7 @@ async def duo_photo_2(message: Message, state: FSMContext, bot: Bot) -> None:
         await state.clear()
         await message.answer("Первое фото потерялось. Начни заново через /menu")
         return
+
     path2 = await save_largest_photo(bot, message, f"{message.from_user.id}_duo2")
     await process_generation(message, state, [path1, path2])
 
@@ -739,11 +902,11 @@ async def send_invoice_handler(call: CallbackQuery) -> None:
     p = PAYLOADS[package]
     await call.bot.send_invoice(
         chat_id=call.from_user.id,
-        title=p["title"],
-        description=f"Пакет {p['title']} для AI Photo Style Bot",
+        title=str(p["title"]),
+        description="Пакет для AI Photo Style Bot",
         payload=f"buy_{package}",
         currency="XTR",
-        prices=[LabeledPrice(label=p["title"], amount=p["stars"])],
+        prices=[LabeledPrice(label=str(p["title"]), amount=int(p["stars"]))],
         start_parameter=f"buy-{package}",
     )
     await call.answer()
@@ -759,29 +922,31 @@ async def successful_payment(message: Message) -> None:
     ensure_user_from_message(message)
     payment = message.successful_payment
     payload = payment.invoice_payload.replace("buy_", "")
+
     if payload not in PAYLOADS:
-        await message.answer("Платеж прошел, но пакет не распознан. Проверь настройки.")
+        await message.answer("Платёж прошёл, но пакет не распознан.")
         return
 
     plan = PAYLOADS[payload]
     added = db.add_payment(
         user_id=message.from_user.id,
         payload=payload,
-        stars=plan["stars"],
-        credits_added=plan["credits"],
+        stars=int(plan["stars"]),
+        credits_added=int(plan["credits"]),
         telegram_payment_charge_id=getattr(payment, "telegram_payment_charge_id", None),
         provider_payment_charge_id=getattr(payment, "provider_payment_charge_id", None),
     )
+
     if not added:
         await message.answer(
-            "Этот платеж уже был зачислен раньше. Баланс не изменен повторно.",
-            reply_markup=main_menu_kb(),
+            "Этот платёж уже был зачислен раньше.",
+            reply_markup=home_reply_kb(),
         )
         return
 
     await message.answer(
-        f"Оплата прошла ✅\n\nДобавлено генераций: {plan['credits']}\nТекущий баланс:\n{cabinet_text(message.from_user.id)}",
-        reply_markup=main_menu_kb(),
+        f"Оплата прошла ✅\n\nДобавлено генераций: {int(plan['credits'])}\n\n{cabinet_text(message.from_user.id)}",
+        reply_markup=home_reply_kb(),
     )
 
 
@@ -789,6 +954,7 @@ async def main() -> None:
     bot = Bot(token=settings.bot_token)
     dp = Dispatcher(storage=MemoryStorage())
     dp.include_router(router)
+
     logger.info("Bot started in polling mode")
     try:
         await bot.delete_webhook(drop_pending_updates=True)
