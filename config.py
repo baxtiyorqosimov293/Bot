@@ -39,8 +39,10 @@ class Settings:
     log_level: str = os.getenv("LOG_LEVEL", "INFO").strip()
 
     free_trials: int = _env_int("FREE_TRIALS", 2)
+
     price_single_xtr: int = _env_int("PRICE_SINGLE_XTR", 39)
     price_month_xtr: int = _env_int("PRICE_MONTH_XTR", 249)
+
     month_limit: int = _env_int("MONTH_LIMIT", 30)
     referral_bonus_credits: int = _env_int("REFERRAL_BONUS_CREDITS", 1)
 
