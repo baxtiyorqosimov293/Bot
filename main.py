@@ -58,6 +58,7 @@ class Settings:
             os.getenv("ADMIN_IDS") or os.getenv("ADMIN_USER_ID") or ""
         )
     )
+
     log_level: str = os.getenv("LOG_LEVEL", "INFO").strip()
 
     free_generations: int = _env_int("FREE_TRIALS", 3)
@@ -69,11 +70,9 @@ class Settings:
     month_plan_credits: int = _env_int("MONTH_LIMIT", 40)
     year_plan_credits: int = _env_int("YEAR_LIMIT", 400)
 
-    image_model: str = os.getenv("OPENAI_IMAGE_MODEL", "gpt-image-1.5").strip()
-    input_fidelity: str = os.getenv("OPENAI_INPUT_FIDELITY", "high").strip()
-    output_format: str = os.getenv("OPENAI_OUTPUT_FORMAT", "jpeg").strip()
-    output_compression: int = _env_int("OPENAI_OUTPUT_COMPRESSION", 95)
-    size: str = os.getenv("OPENAI_SIZE", "1024x1024").strip()
+    image_model: str = os.getenv("OPENAI_IMAGE_MODEL", "gpt-image-1").strip()
+    image_size: str = os.getenv("OPENAI_SIZE", "1024x1024").strip()
+    image_quality: str = os.getenv("OPENAI_QUALITY", "high").strip()
 
     db_path: str = os.getenv("DB_PATH", "/var/data/bot.db").strip()
     temp_dir: str = os.getenv("TEMP_DIR", "tmp").strip()
@@ -109,17 +108,18 @@ STYLE_PRESETS: dict[str, StylePreset] = {
         title="Classic Studio",
         description="Чистый премиальный студийный портрет.",
         prompt_fragment=(
-            "Create a premium studio portrait with clean elegant styling, natural skin texture, "
-            "soft flattering light, polished editorial composition, and subtle luxury feel."
+            "Use a subtle premium studio style with soft clean lighting, realistic skin texture, "
+            "natural proportions, elegant composition, and a refined editorial feel. "
+            "Keep the person realistic and recognizable."
         ),
     ),
     "anime": StylePreset(
         code="anime",
         title="Anime Cinematic",
-        description="Аниме-стиль с сохранением лица.",
+        description="Мягкий аниме-стиль с сохранением лица.",
         prompt_fragment=(
-            "Transform the photo into a cinematic anime-inspired portrait with rich atmosphere, "
-            "beautiful light, stylish outfit adaptation, and high detail while keeping the real person's face recognizable."
+            "Apply a soft cinematic anime-inspired mood only if facial identity remains highly accurate. "
+            "Do not over-stylize the face. Keep strong likeness to the real person."
         ),
     ),
     "dubai": StylePreset(
@@ -127,8 +127,8 @@ STYLE_PRESETS: dict[str, StylePreset] = {
         title="Dubai Luxe",
         description="Luxury / Dubai / old money aesthetic.",
         prompt_fragment=(
-            "Create a luxury Dubai old-money portrait with premium fashion styling, elegant pose, "
-            "high-end background, aspirational social-media look, and refined editorial lighting."
+            "Apply a subtle luxury Dubai old-money aesthetic with premium fashion mood, elegant lighting, "
+            "upscale atmosphere, and social-media-ready composition, while keeping the face natural and highly recognizable."
         ),
     ),
 }
@@ -325,7 +325,7 @@ class Database:
                     """,
                     (user_id,),
                 )
-            else:
+            elif source == "paid":
                 conn.execute(
                     """
                     UPDATE users
@@ -406,11 +406,8 @@ class OpenAIImageService:
                 model=settings.image_model,
                 image=files if len(files) > 1 else files[0],
                 prompt=prompt,
-                size=settings.size,
+                size=settings.image_size,
                 n=1,
-                input_fidelity=settings.input_fidelity,
-                output_format=settings.output_format,
-                output_compression=settings.output_compression,
             )
         finally:
             for f in files:
@@ -420,7 +417,7 @@ class OpenAIImageService:
                     pass
 
         if not getattr(response, "data", None):
-            raise RuntimeError("OpenAI не вернул data в images.edit")
+            raise RuntimeError("OpenAI не вернул data")
 
         item = response.data[0]
         b64_json = getattr(item, "b64_json", None)
@@ -431,10 +428,11 @@ class OpenAIImageService:
     async def stylize_person(self, image_path: str, style_code: str) -> bytes:
         style = STYLE_PRESETS[style_code]
         prompt = (
-            "Edit the uploaded portrait photo. Keep the exact same person highly recognizable. "
-            "Preserve face identity, face proportions, eye shape, nose shape, lips, skin tone, and overall likeness. "
-            "Do not replace the face with a different person. "
-            "You may improve pose, outfit styling, background, lighting, and composition. "
+            "Edit the uploaded portrait photo. Keep the exact same real person highly recognizable. "
+            "Preserve facial identity, face proportions, eye shape, eyebrow shape, nose shape, lips, "
+            "jawline, and skin tone. Do not replace the face with another person. "
+            "You may improve background, lighting, clothing styling, and composition. "
+            "Identity accuracy is more important than beauty enhancement. "
             f"{style.prompt_fragment}"
         )
         return await asyncio.to_thread(self._edit_images, [image_path], prompt)
@@ -442,10 +440,16 @@ class OpenAIImageService:
     async def merge_two_people(self, image_paths: Iterable[str], style_code: str) -> bytes:
         style = STYLE_PRESETS[style_code]
         prompt = (
-            "Create one combined premium image using the uploaded reference photos. "
-            "If the photos contain two different people, keep both faces faithful and recognizable. "
-            "Do not invent new faces. "
-            "Make the final result look natural, coherent, and social-media ready. "
+            "Create one combined realistic portrait using the two uploaded reference photos. "
+            "These are two specific real people. Preserve both identities very accurately. "
+            "Do not beautify them into different people. Do not change age, ethnicity, skin tone, "
+            "face shape, eye shape, eyebrow shape, nose shape, lip shape, or jawline. "
+            "Keep each person's face highly recognizable and faithful to their own reference. "
+            "The first person must still look exactly like the first uploaded photo. "
+            "The second person must still look exactly like the second uploaded photo. "
+            "Do not invent new faces, do not blend their identities, and do not average facial features. "
+            "Make them stand together naturally in one coherent scene with realistic proportions and lighting. "
+            "Use premium composition, but identity accuracy is more important than style. "
             f"{style.prompt_fragment}"
         )
         return await asyncio.to_thread(self._edit_images, list(image_paths), prompt)
@@ -499,7 +503,19 @@ def ensure_user_from_callback(call: CallbackQuery) -> None:
     db.ensure_user(user.id, user.username, user.full_name)
 
 
+def is_admin(user_id: int) -> bool:
+    return user_id in settings.admin_ids
+
+
 def cabinet_text(user_id: int) -> str:
+    if is_admin(user_id):
+        return (
+            "👤 Ваш кабинет\n\n"
+            "Статус: Админ\n"
+            "Тестовый режим: безлимит\n"
+            "Списания: отключены"
+        )
+
     user = db.get_user(user_id)
     if not user:
         return "Пользователь не найден."
@@ -610,7 +626,7 @@ async def cancel_cmd(message: Message, state: FSMContext) -> None:
 @router.message(Command("admin_stats"))
 async def admin_stats(message: Message) -> None:
     ensure_user_from_message(message)
-    if message.from_user.id not in settings.admin_ids:
+    if not is_admin(message.from_user.id):
         return
     s = db.stats()
     await message.answer(
@@ -647,6 +663,9 @@ async def open_buy_menu(message: Message) -> None:
 @router.message(F.text == "⚡ 1 генерация")
 async def buy_single_from_button(message: Message) -> None:
     ensure_user_from_message(message)
+    if is_admin(message.from_user.id):
+        await message.answer("Ты админ. У тебя безлимитный тестовый режим.", reply_markup=home_reply_kb())
+        return
     p = PAYLOADS["single"]
     await message.bot.send_invoice(
         chat_id=message.from_user.id,
@@ -662,6 +681,9 @@ async def buy_single_from_button(message: Message) -> None:
 @router.message(F.text == "📅 Month Pro")
 async def buy_month_from_button(message: Message) -> None:
     ensure_user_from_message(message)
+    if is_admin(message.from_user.id):
+        await message.answer("Ты админ. У тебя безлимитный тестовый режим.", reply_markup=home_reply_kb())
+        return
     p = PAYLOADS["month"]
     await message.bot.send_invoice(
         chat_id=message.from_user.id,
@@ -677,6 +699,9 @@ async def buy_month_from_button(message: Message) -> None:
 @router.message(F.text == "🏆 Year Pro")
 async def buy_year_from_button(message: Message) -> None:
     ensure_user_from_message(message)
+    if is_admin(message.from_user.id):
+        await message.answer("Ты админ. У тебя безлимитный тестовый режим.", reply_markup=home_reply_kb())
+        return
     p = PAYLOADS["year"]
     await message.bot.send_invoice(
         chat_id=message.from_user.id,
@@ -801,7 +826,7 @@ async def process_generation(message: Message, state: FSMContext, paths: list[st
         cleanup_paths(paths)
         return
 
-    if not db.can_generate(user_id):
+    if (not is_admin(user_id)) and (not db.can_generate(user_id)):
         await message.answer(
             "Бесплатные попытки закончились. Купи пакет, чтобы продолжить.",
             reply_markup=buy_kb(),
@@ -812,7 +837,11 @@ async def process_generation(message: Message, state: FSMContext, paths: list[st
 
     data = await state.get_data()
     style = data["style"]
-    source = db.consume_generation(user_id)
+
+    if is_admin(user_id):
+        source = "admin"
+    else:
+        source = db.consume_generation(user_id)
 
     async with lock:
         await message.answer("🪄 Генерирую фото... Это может занять немного времени.")
@@ -837,13 +866,16 @@ async def process_generation(message: Message, state: FSMContext, paths: list[st
 
         except Exception as e:
             logger.exception("Generation failed: %s", e)
-            db.refund_generation(user_id, source)
+            if source != "admin":
+                db.refund_generation(user_id, source)
+
             err_text = str(e)[:800]
             await message.answer(
                 "Не удалось сгенерировать изображение.\n\n"
                 f"Техническая ошибка:\n{err_text}",
                 reply_markup=home_reply_kb(),
             )
+
             for admin_id in settings.admin_ids:
                 try:
                     await message.bot.send_message(
@@ -852,6 +884,7 @@ async def process_generation(message: Message, state: FSMContext, paths: list[st
                     )
                 except Exception:
                     pass
+
         finally:
             cleanup_paths(paths + ([str(result_path)] if result_path else []))
             await state.clear()
@@ -894,6 +927,10 @@ async def wrong_content(message: Message) -> None:
 @router.callback_query(F.data.startswith("invoice:"))
 async def send_invoice_handler(call: CallbackQuery) -> None:
     ensure_user_from_callback(call)
+    if is_admin(call.from_user.id):
+        await call.answer("Ты админ. У тебя безлимитный тестовый режим.", show_alert=True)
+        return
+
     package = call.data.split(":", 1)[1]
     if package not in PAYLOADS:
         await call.answer("Пакет не найден", show_alert=True)
