@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import os
+import time
 from dataclasses import dataclass
 
 import replicate
@@ -72,7 +73,7 @@ class OpenAIImageGenerator:
         self,
         image_path: str,
         style_code: str,
-        variants_count: int = 3,
+        variants_count: int = 1,
     ) -> list[GeneratedVariant]:
         results: list[GeneratedVariant] = []
 
@@ -101,38 +102,58 @@ class ReplicateImageGenerator:
         style_prompt = STYLE_PROMPTS[style_code]
         return (
             "Keep the exact same person. Preserve facial identity, face shape, eyes, nose, lips, "
-            "skin tone, and hair. Do not turn the subject into another person. "
+            "skin tone, hair, and overall likeness. Do not turn the subject into another person. "
             "Apply only a premium portrait transformation with realistic lighting and refined styling. "
             f"{style_prompt}"
         )
 
     def _run_once(self, image_path: str, style_code: str) -> bytes:
         prompt = self._build_prompt(style_code)
+        last_error: Exception | None = None
 
-        with open(image_path, "rb") as image_file:
-            output = replicate.run(
-                settings.replicate_model,
-                input={
-                    "input_image": image_file,
-                    "prompt": prompt,
-                },
-            )
+        for attempt in range(3):
+            try:
+                with open(image_path, "rb") as image_file:
+                    output = replicate.run(
+                        settings.replicate_model,
+                        input={
+                            "input_image": image_file,
+                            "prompt": prompt,
+                        },
+                    )
 
-        if not output:
-            raise RuntimeError("Replicate не вернул output")
+                if not output:
+                    raise RuntimeError("Replicate не вернул output")
 
-        first = output[0] if isinstance(output, list) else output
-        image_bytes = first.read()
-        if not image_bytes:
-            raise RuntimeError("Replicate вернул пустой результат")
+                first = output[0] if isinstance(output, list) else output
 
-        return image_bytes
+                if hasattr(first, "read"):
+                    image_bytes = first.read()
+                else:
+                    raise RuntimeError("Replicate вернул неожиданный формат результата")
+
+                if not image_bytes:
+                    raise RuntimeError("Replicate вернул пустой результат")
+
+                return image_bytes
+
+            except Exception as e:
+                last_error = e
+                err = str(e).lower()
+
+                if "429" in err or "throttled" in err or "rate limit" in err:
+                    time.sleep(3 + attempt * 2)
+                    continue
+
+                raise
+
+        raise RuntimeError(f"Replicate throttled after retries: {last_error}")
 
     async def generate_variants(
         self,
         image_path: str,
         style_code: str,
-        variants_count: int = 3,
+        variants_count: int = 1,
     ) -> list[GeneratedVariant]:
         results: list[GeneratedVariant] = []
 
