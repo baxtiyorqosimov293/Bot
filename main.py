@@ -714,6 +714,30 @@ async def buy_year_from_button(message: Message) -> None:
     )
 
 
+@router.message(Command("star_balance"))
+async def star_balance_cmd(message: Message) -> None:
+    ensure_user_from_message(message)
+
+    if not is_admin(message.from_user.id):
+        await message.answer("Эта команда доступна только админу.")
+        return
+
+    try:
+        balance = await message.bot.get_my_star_balance()
+
+        amount = getattr(balance, "amount", 0)
+        nanostar_amount = getattr(balance, "nanostar_amount", 0)
+
+        text = (
+            "⭐ Баланс Stars бота\n\n"
+            f"Stars: {amount}\n"
+            f"NanoStars: {nanostar_amount}"
+        )
+
+        await message.answer(text, reply_markup=home_reply_kb())
+    except Exception as e:
+        await message.answer(f"Не удалось получить баланс Stars:\n{str(e)[:800]}")
+
 @router.message(F.text == "💰 Баланс")
 async def balance_from_button(message: Message) -> None:
     ensure_user_from_message(message)
