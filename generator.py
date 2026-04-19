@@ -21,18 +21,33 @@ class GeneratedVariant:
 
 STYLE_PROMPTS: dict[str, str] = {
     "classic": (
-        "Create a new premium portrait based on the uploaded photo. "
-        "Keep the same real person highly recognizable, but do not simply return the original image. "
-        "Improve lighting, composition, skin tone balance, styling, clothing presentation, and background mood. "
-        "Make it look like a professionally shot premium portrait, not a basic retouch. "
-        "Use elegant studio-style lighting, clean premium atmosphere, and refined portrait composition."
+        "Create a distinctly new premium studio portrait based on the uploaded photo. "
+        "Keep the same real person highly recognizable and preserve identity very accurately. "
+        "Preserve face shape, facial proportions, eye shape, eyebrows, nose, lips, jawline, "
+        "skin tone, hairline, hair texture, beard details if present, and natural expression. "
+        "Do not change the person into someone else. "
+        "Do not simply return the original image with tiny edits. "
+        "Do not keep the original outdoor, casual, or real-life background. "
+        "Replace the background with a clean deep black professional studio backdrop. "
+        "Use elegant controlled studio lighting, premium portrait framing, realistic skin texture, "
+        "sharp facial detail, rich contrast, and a high-end editorial studio look. "
+        "The result must look like a newly shot professional studio portrait with a black backdrop, "
+        "not a small retouch of the original photo. "
+        "Avoid blur, washed-out detail, soft mushy texture, compression artifacts, plastic skin, "
+        "excessive smoothing, beauty filter look, or over-beautified facial changes."
     ),
     "dubai": (
-        "Create a new premium luxury portrait based on the uploaded photo. "
-        "Keep the same real person highly recognizable, but do not simply return the original image. "
-        "Transform the scene into a soft luxury portrait with premium lighting, elegant styling, "
-        "expensive atmosphere, refined beauty, and polished composition. "
-        "The result must look like a newly created premium portrait, not a small edit of the original photo."
+        "Create a distinctly new premium luxury portrait based on the uploaded photo. "
+        "Keep the same real person highly recognizable and preserve identity very accurately. "
+        "Preserve face shape, facial proportions, eye shape, eyebrows, nose, lips, jawline, "
+        "skin tone, hairline, hair texture, beard details if present, and natural expression. "
+        "Do not change the person into someone else. "
+        "Do not simply return the original image with tiny edits. "
+        "Transform the image into a refined luxury portrait with premium lighting, elegant styling, "
+        "expensive atmosphere, polished composition, and rich cinematic tones. "
+        "The result must feel like a newly created high-end portrait, not a minimal retouch of the original photo. "
+        "Avoid blur, washed-out detail, soft mushy texture, compression artifacts, plastic skin, "
+        "excessive smoothing, beauty filter look, or artificial facial changes."
     ),
 }
 
@@ -44,13 +59,17 @@ class OpenAIImageGenerator:
     def _build_prompt(self, style_code: str) -> str:
         style_prompt = STYLE_PROMPTS[style_code]
         return (
-            "Keep the same real person clearly recognizable and preserve identity. "
-            "Preserve facial identity, face shape, eyes, nose, lips, skin tone, and hair texture. "
+            "Identity preservation is the top priority. "
+            "Keep the same real person clearly recognizable and preserve identity accurately. "
+            "Preserve facial geometry, facial proportions, skin tone, hairline, hair texture, "
+            "and natural expression. "
             "Do not turn the subject into another person. "
-            "However, do not simply return the original image. "
-            "Create a distinctly new premium portrait with upgraded composition, cleaner light, "
-            "better framing, premium styling, and a more expensive visual atmosphere. "
-            "The result must feel like a new professionally created portrait, not a minimal retouch. "
+            "Do not simply return the original image with tiny edits. "
+            "Create a distinctly new premium portrait with stronger professional styling, cleaner composition, "
+            "and a more expensive visual presentation. "
+            "The image must look sharp, high-quality, detailed, and professional. "
+            "Avoid blur, compression artifacts, low-detail rendering, soft mushy texture, plastic skin, "
+            "or over-retouched beauty filter look. "
             f"{style_prompt}"
         )
 
@@ -108,15 +127,33 @@ class ReplicateImageGenerator:
     def _build_prompt(self, style_code: str) -> str:
         style_prompt = STYLE_PROMPTS[style_code]
         return (
-            "Keep the same real person clearly recognizable and preserve identity. "
-            "Preserve facial identity, face shape, eyes, nose, lips, skin tone, and hair texture. "
+            "Identity preservation is the top priority. "
+            "Keep the same real person clearly recognizable and preserve identity accurately. "
+            "Preserve facial geometry, facial proportions, skin tone, hairline, hair texture, "
+            "and natural expression. "
             "Do not turn the subject into another person. "
-            "However, do not simply return the original image. "
-            "Create a distinctly new premium portrait with upgraded composition, cleaner light, "
-            "better framing, premium styling, and a more expensive visual atmosphere. "
-            "The result must feel like a new professionally created portrait, not a minimal retouch. "
+            "Do not simply return the original image with tiny edits. "
+            "Create a distinctly new premium portrait with stronger professional styling, cleaner composition, "
+            "and a more expensive visual presentation. "
+            "The image must look sharp, high-quality, detailed, and professional. "
+            "Avoid blur, compression artifacts, low-detail rendering, soft mushy texture, plastic skin, "
+            "or over-retouched beauty filter look. "
             f"{style_prompt}"
         )
+
+    def _extract_bytes_from_output(self, output) -> bytes:
+        if not output:
+            raise RuntimeError("Replicate не вернул output")
+
+        first = output[0] if isinstance(output, list) else output
+
+        if hasattr(first, "read"):
+            image_bytes = first.read()
+            if not image_bytes:
+                raise RuntimeError("Replicate вернул пустой результат")
+            return image_bytes
+
+        raise RuntimeError("Replicate вернул неожиданный формат результата")
 
     def _run_once(self, image_path: str, style_code: str) -> bytes:
         prompt = self._build_prompt(style_code)
@@ -133,20 +170,7 @@ class ReplicateImageGenerator:
                         },
                     )
 
-                if not output:
-                    raise RuntimeError("Replicate не вернул output")
-
-                first = output[0] if isinstance(output, list) else output
-
-                if hasattr(first, "read"):
-                    image_bytes = first.read()
-                else:
-                    raise RuntimeError("Replicate вернул неожиданный формат результата")
-
-                if not image_bytes:
-                    raise RuntimeError("Replicate вернул пустой результат")
-
-                return image_bytes
+                return self._extract_bytes_from_output(output)
 
             except Exception as e:
                 last_error = e
