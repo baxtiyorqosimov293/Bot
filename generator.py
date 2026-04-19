@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import os
 from dataclasses import dataclass
 
+import replicate
 from openai import OpenAI
 
 from config import settings
@@ -32,18 +34,20 @@ class OpenAIImageGenerator:
     def __init__(self) -> None:
         self.client = OpenAI(api_key=settings.openai_api_key)
 
-    def _edit_image_once(self, image_path: str, style_code: str) -> bytes:
+    def _build_prompt(self, style_code: str) -> str:
         style_prompt = STYLE_PROMPTS[style_code]
-
-        prompt = (
+        return (
             "Edit the uploaded portrait photo and keep the same real person recognizable. "
-            "Preserve the person's natural face, expression, and overall likeness. "
+            "Preserve the person's natural face, expression, eye shape, nose shape, lips, jawline, "
+            "hair texture, and overall likeness. "
             "Do not replace the face with a different person. "
-            "Keep the result realistic, soft, and natural-looking. "
-            "You may improve lighting, background, styling, and composition, "
-            "but the final image must still clearly look like the original person. "
+            "Change only styling, lighting, atmosphere, and premium visual presentation. "
+            "Keep the result realistic, refined, and natural-looking. "
             f"{style_prompt}"
         )
+
+    def _edit_image_once(self, image_path: str, style_code: str) -> bytes:
+        prompt = self._build_prompt(style_code)
 
         with open(image_path, "rb") as image_file:
             response = self.client.images.edit(
@@ -89,4 +93,70 @@ class OpenAIImageGenerator:
         return results
 
 
-generator = OpenAIImageGenerator()
+class ReplicateImageGenerator:
+    def __init__(self) -> None:
+        os.environ["REPLICATE_API_TOKEN"] = settings.replicate_api_token
+
+    def _build_prompt(self, style_code: str) -> str:
+        style_prompt = STYLE_PROMPTS[style_code]
+        return (
+            "Keep the exact same person. Preserve facial identity, face shape, eyes, nose, lips, "
+            "skin tone, and hair. Do not turn the subject into another person. "
+            "Apply only a premium portrait transformation with realistic lighting and refined styling. "
+            f"{style_prompt}"
+        )
+
+    def _run_once(self, image_path: str, style_code: str) -> bytes:
+        prompt = self._build_prompt(style_code)
+
+        with open(image_path, "rb") as image_file:
+            output = replicate.run(
+                settings.replicate_model,
+                input={
+                    "input_image": image_file,
+                    "prompt": prompt,
+                },
+            )
+
+        if not output:
+            raise RuntimeError("Replicate не вернул output")
+
+        first = output[0] if isinstance(output, list) else output
+        image_bytes = first.read()
+        if not image_bytes:
+            raise RuntimeError("Replicate вернул пустой результат")
+
+        return image_bytes
+
+    async def generate_variants(
+        self,
+        image_path: str,
+        style_code: str,
+        variants_count: int = 3,
+    ) -> list[GeneratedVariant]:
+        results: list[GeneratedVariant] = []
+
+        for idx in range(variants_count):
+            image_bytes = await asyncio.to_thread(
+                self._run_once,
+                image_path,
+                style_code,
+            )
+            results.append(
+                GeneratedVariant(
+                    image_bytes=image_bytes,
+                    style_code=style_code,
+                    variant_index=idx + 1,
+                )
+            )
+
+        return results
+
+
+def build_generator():
+    if settings.image_provider == "replicate":
+        return ReplicateImageGenerator()
+    return OpenAIImageGenerator()
+
+
+generator = build_generator()
