@@ -44,7 +44,7 @@ logging.basicConfig(
     level=getattr(logging, settings.log_level.upper(), logging.INFO),
     format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
 )
-logger = logging.getLogger("azibax_ai_v2")
+logger = logging.getLogger("azibax_ai_v3")
 
 router = Router()
 validator = PhotoValidator()
@@ -165,6 +165,7 @@ def is_billing_error(text: str) -> bool:
         or "hard limit" in lowered
         or "quota" in lowered
         or "insufficient credit" in lowered
+        or "balance" in lowered
     )
 
 
@@ -536,6 +537,9 @@ async def process_generation(message: Message, state: FSMContext, image_path: st
                 result_path = settings.temp_path / f"result_{user_id}_{uuid4().hex}.jpg"
                 result_path.write_bytes(variant.image_bytes)
                 generated_paths.append(str(result_path))
+
+            if not generated_paths:
+                raise RuntimeError("Генератор не вернул изображение")
 
             best_path = generated_paths[0]
 
