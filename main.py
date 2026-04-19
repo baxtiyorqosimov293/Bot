@@ -3,7 +3,6 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
-from pathlib import Path
 from uuid import uuid4
 
 from aiogram import Bot, Dispatcher, F, Router
@@ -161,7 +160,22 @@ def cleanup_paths(paths: list[str | None]) -> None:
 
 def is_billing_error(text: str) -> bool:
     lowered = text.lower()
-    return "billing" in lowered or "hard limit" in lowered or "quota" in lowered
+    return (
+        "billing" in lowered
+        or "hard limit" in lowered
+        or "quota" in lowered
+        or "insufficient credit" in lowered
+    )
+
+
+def is_rate_limit_error(text: str) -> bool:
+    lowered = text.lower()
+    return (
+        "429" in lowered
+        or "throttled" in lowered
+        or "rate limit" in lowered
+        or "too many requests" in lowered
+    )
 
 
 @router.message(CommandStart())
@@ -515,7 +529,7 @@ async def process_generation(message: Message, state: FSMContext, image_path: st
             variants = await generator.generate_variants(
                 image_path=image_path,
                 style_code=style,
-                variants_count=3,
+                variants_count=1,
             )
 
             for variant in variants:
@@ -541,14 +555,22 @@ async def process_generation(message: Message, state: FSMContext, image_path: st
             if source != "admin":
                 db.refund_generation(user_id, source)
 
-            user_text = TEMPORARY_UNAVAILABLE_TEXT if is_billing_error(str(e)) else SERVICE_ERROR_TEXT
+            err_text = str(e)
+
+            if is_billing_error(err_text):
+                user_text = TEMPORARY_UNAVAILABLE_TEXT
+            elif is_rate_limit_error(err_text):
+                user_text = "⚠️ Сервис сейчас перегружен. Попробуй ещё раз через несколько секунд."
+            else:
+                user_text = SERVICE_ERROR_TEXT
+
             await message.answer(user_text, reply_markup=home_reply_kb())
 
             for admin_id in settings.admin_ids:
                 try:
                     await message.bot.send_message(
                         admin_id,
-                        f"Ошибка генерации у user_id={user_id}:\n{str(e)[:1200]}",
+                        f"Ошибка генерации у user_id={user_id}:\n{err_text[:1200]}",
                     )
                 except Exception:
                     pass
