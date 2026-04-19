@@ -14,6 +14,7 @@ from uuid import uuid4
 from aiogram import Bot, Dispatcher, F, Router
 from aiogram.enums import ContentType
 from aiogram.filters import Command, CommandStart
+from aiogram.filters.command import CommandObject
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
@@ -60,7 +61,6 @@ class Settings:
     )
 
     log_level: str = os.getenv("LOG_LEVEL", "INFO").strip()
-
     free_generations: int = _env_int("FREE_TRIALS", 3)
 
     single_generation_stars: int = _env_int("PRICE_SINGLE_XTR", 45)
@@ -70,9 +70,10 @@ class Settings:
     month_plan_credits: int = _env_int("MONTH_LIMIT", 40)
     year_plan_credits: int = _env_int("YEAR_LIMIT", 400)
 
+    referral_bonus_credits: int = _env_int("REFERRAL_BONUS_CREDITS", 1)
+
     image_model: str = os.getenv("OPENAI_IMAGE_MODEL", "gpt-image-1").strip()
-    image_size: str = os.getenv("OPENAI_SIZE", "1024x1024").strip()
-    image_quality: str = os.getenv("OPENAI_QUALITY", "high").strip()
+    image_size: str = os.getenv("OPENAI_SIZE", "768x768").strip()
 
     db_path: str = os.getenv("DB_PATH", "/var/data/bot.db").strip()
     temp_dir: str = os.getenv("TEMP_DIR", "tmp").strip()
@@ -106,11 +107,10 @@ STYLE_PRESETS: dict[str, StylePreset] = {
     "classic": StylePreset(
         code="classic",
         title="Classic Studio",
-        description="Чистый премиальный студийный портрет.",
+        description="Чистый premium-портрет с мягким светом.",
         prompt_fragment=(
-            "Use a subtle premium studio style with soft clean lighting, realistic skin texture, "
-            "natural proportions, elegant composition, and a refined editorial feel. "
-            "Keep the person realistic and recognizable."
+            "Use a subtle clean studio portrait style with soft natural lighting and minimal changes. "
+            "Do not over-beautify or over-correct the face."
         ),
     ),
     "anime": StylePreset(
@@ -118,8 +118,8 @@ STYLE_PRESETS: dict[str, StylePreset] = {
         title="Anime Cinematic",
         description="Мягкий аниме-стиль с сохранением лица.",
         prompt_fragment=(
-            "Apply a soft cinematic anime-inspired mood only if facial identity remains highly accurate. "
-            "Do not over-stylize the face. Keep strong likeness to the real person."
+            "Apply a soft cinematic anime-inspired mood only if the real face remains recognizable. "
+            "Do not turn the person into a different character."
         ),
     ),
     "dubai": StylePreset(
@@ -127,17 +127,17 @@ STYLE_PRESETS: dict[str, StylePreset] = {
         title="Dubai Luxe",
         description="Luxury / Dubai / old money aesthetic.",
         prompt_fragment=(
-            "Apply a subtle luxury Dubai old-money aesthetic with premium fashion mood, elegant lighting, "
-            "upscale atmosphere, and social-media-ready composition, while keeping the face natural and highly recognizable."
+            "Apply a subtle luxury Dubai old-money aesthetic with elegant lighting, premium styling, "
+            "and upscale atmosphere, but keep the real face natural and recognizable."
         ),
     ),
 }
 
 
 def style_text() -> str:
-    lines = ["Доступные стили:\n"]
+    lines = ["🎨 <b>Доступные стили</b>\n"]
     for preset in STYLE_PRESETS.values():
-        lines.append(f"• {preset.title} — {preset.description}")
+        lines.append(f"• <b>{preset.title}</b> — {preset.description}")
     return "\n".join(lines)
 
 
@@ -154,11 +154,10 @@ def main_menu_kb() -> InlineKeyboardMarkup:
 
 
 def style_picker_kb(mode: str) -> InlineKeyboardMarkup:
-    rows = []
-    for style in STYLE_PRESETS.values():
-        rows.append(
-            [InlineKeyboardButton(text=f"✨ {style.title}", callback_data=f"style:{mode}:{style.code}")]
-        )
+    rows = [
+        [InlineKeyboardButton(text=f"✨ {style.title}", callback_data=f"style:{mode}:{style.code}")]
+        for style in STYLE_PRESETS.values()
+    ]
     rows.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="back:menu")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
@@ -178,12 +177,12 @@ def home_reply_kb() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
         keyboard=[
             [
-                KeyboardButton(text="🖼 Отправить фото"),
+                KeyboardButton(text="🖼 Создать фото"),
                 KeyboardButton(text="🎨 Стили"),
             ],
             [
-                KeyboardButton(text="✨ Создать фото"),
-                KeyboardButton(text="💳 Купить кредиты"),
+                KeyboardButton(text="💳 Купить"),
+                KeyboardButton(text="💰 Баланс"),
             ],
             [
                 KeyboardButton(text="⚡ 1 генерация"),
@@ -192,8 +191,7 @@ def home_reply_kb() -> ReplyKeyboardMarkup:
             ],
             [
                 KeyboardButton(text="👥 Рефералка"),
-                KeyboardButton(text="💰 Баланс"),
-                KeyboardButton(text="🔥 Идеи"),
+                KeyboardButton(text="⭐ Stars баланс"),
             ],
         ],
         resize_keyboard=True,
@@ -210,6 +208,9 @@ class UserRecord:
     paid_credits: int
     total_paid_stars: int
     total_generations: int
+    referrer_id: int | None
+    referral_bonus_given: int
+    referrals_count: int
 
 
 class Database:
@@ -217,6 +218,7 @@ class Database:
         self.path = path
         Path(path).parent.mkdir(parents=True, exist_ok=True)
         self.init_db()
+        self.migrate_db()
 
     @contextmanager
     def connect(self):
@@ -242,6 +244,9 @@ class Database:
                     paid_credits INTEGER NOT NULL DEFAULT 0,
                     total_paid_stars INTEGER NOT NULL DEFAULT 0,
                     total_generations INTEGER NOT NULL DEFAULT 0,
+                    referrer_id INTEGER,
+                    referral_bonus_given INTEGER NOT NULL DEFAULT 0,
+                    referrals_count INTEGER NOT NULL DEFAULT 0,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 );
 
@@ -257,6 +262,20 @@ class Database:
                 );
                 """
             )
+
+    def migrate_db(self) -> None:
+        with self.connect() as conn:
+            columns = {
+                row["name"]
+                for row in conn.execute("PRAGMA table_info(users)").fetchall()
+            }
+
+            if "referrer_id" not in columns:
+                conn.execute("ALTER TABLE users ADD COLUMN referrer_id INTEGER")
+            if "referral_bonus_given" not in columns:
+                conn.execute("ALTER TABLE users ADD COLUMN referral_bonus_given INTEGER NOT NULL DEFAULT 0")
+            if "referrals_count" not in columns:
+                conn.execute("ALTER TABLE users ADD COLUMN referrals_count INTEGER NOT NULL DEFAULT 0")
 
     def ensure_user(self, user_id: int, username: str | None, full_name: str) -> None:
         with self.connect() as conn:
@@ -276,7 +295,8 @@ class Database:
             row = conn.execute(
                 """
                 SELECT user_id, username, full_name, free_used, paid_credits,
-                       total_paid_stars, total_generations
+                       total_paid_stars, total_generations,
+                       referrer_id, referral_bonus_given, referrals_count
                 FROM users
                 WHERE user_id=?
                 """,
@@ -382,16 +402,58 @@ class Database:
             )
             return True
 
+    def bind_referral(self, new_user_id: int, referrer_id: int, bonus_credits: int) -> bool:
+        with self.connect() as conn:
+            new_user = conn.execute(
+                """
+                SELECT referrer_id, referral_bonus_given
+                FROM users
+                WHERE user_id=?
+                """,
+                (new_user_id,),
+            ).fetchone()
+
+            referrer = conn.execute(
+                "SELECT user_id FROM users WHERE user_id=?",
+                (referrer_id,),
+            ).fetchone()
+
+            if not new_user or not referrer:
+                return False
+
+            if new_user_id == referrer_id:
+                return False
+
+            if new_user["referrer_id"] is not None:
+                return False
+
+            conn.execute(
+                """
+                UPDATE users
+                SET referrer_id=?,
+                    referral_bonus_given=1
+                WHERE user_id=?
+                """,
+                (referrer_id, new_user_id),
+            )
+
+            conn.execute(
+                """
+                UPDATE users
+                SET paid_credits=paid_credits+?,
+                    referrals_count=referrals_count+1
+                WHERE user_id=?
+                """,
+                (bonus_credits, referrer_id),
+            )
+            return True
+
     def stats(self) -> dict[str, int]:
         with self.connect() as conn:
             return {
                 "users": conn.execute("SELECT COUNT(*) AS c FROM users").fetchone()["c"],
-                "generations": conn.execute(
-                    "SELECT COALESCE(SUM(total_generations),0) AS c FROM users"
-                ).fetchone()["c"],
-                "paid_stars": conn.execute(
-                    "SELECT COALESCE(SUM(total_paid_stars),0) AS c FROM users"
-                ).fetchone()["c"],
+                "generations": conn.execute("SELECT COALESCE(SUM(total_generations),0) AS c FROM users").fetchone()["c"],
+                "paid_stars": conn.execute("SELECT COALESCE(SUM(total_paid_stars),0) AS c FROM users").fetchone()["c"],
             }
 
 
@@ -423,16 +485,18 @@ class OpenAIImageService:
         b64_json = getattr(item, "b64_json", None)
         if not b64_json:
             raise RuntimeError("OpenAI не вернул b64_json")
+
         return base64.b64decode(b64_json)
 
     async def stylize_person(self, image_path: str, style_code: str) -> bytes:
         style = STYLE_PRESETS[style_code]
         prompt = (
-            "Edit the uploaded portrait photo. Keep the exact same real person highly recognizable. "
-            "Preserve facial identity, face proportions, eye shape, eyebrow shape, nose shape, lips, "
-            "jawline, and skin tone. Do not replace the face with another person. "
-            "You may improve background, lighting, clothing styling, and composition. "
-            "Identity accuracy is more important than beauty enhancement. "
+            "Edit the uploaded portrait photo and keep the same real person recognizable. "
+            "Preserve the person's natural face, expression, and overall likeness. "
+            "Do not replace the face with a different person. "
+            "Keep the result realistic, soft, and natural-looking. "
+            "You may improve lighting, background, styling, and composition, "
+            "but the final image must still clearly look like the original person. "
             f"{style.prompt_fragment}"
         )
         return await asyncio.to_thread(self._edit_images, [image_path], prompt)
@@ -466,21 +530,9 @@ db = Database(settings.db_path)
 image_service = OpenAIImageService()
 
 PAYLOADS: dict[str, dict[str, int | str]] = {
-    "single": {
-        "title": "1 генерация",
-        "stars": settings.single_generation_stars,
-        "credits": 1,
-    },
-    "month": {
-        "title": "Month Pro",
-        "stars": settings.month_plan_stars,
-        "credits": settings.month_plan_credits,
-    },
-    "year": {
-        "title": "Year Pro",
-        "stars": settings.year_plan_stars,
-        "credits": settings.year_plan_credits,
-    },
+    "single": {"title": "1 генерация", "stars": settings.single_generation_stars, "credits": 1},
+    "month": {"title": "Month Pro", "stars": settings.month_plan_stars, "credits": settings.month_plan_credits},
+    "year": {"title": "Year Pro", "stars": settings.year_plan_stars, "credits": settings.year_plan_credits},
 }
 
 router = Router()
@@ -510,7 +562,7 @@ def is_admin(user_id: int) -> bool:
 def cabinet_text(user_id: int) -> str:
     if is_admin(user_id):
         return (
-            "👤 Ваш кабинет\n\n"
+            "🛡 <b>Админ-кабинет</b>\n\n"
             "Статус: Админ\n"
             "Тестовый режим: безлимит\n"
             "Списания: отключены"
@@ -519,26 +571,31 @@ def cabinet_text(user_id: int) -> str:
     user = db.get_user(user_id)
     if not user:
         return "Пользователь не найден."
+
     free_left = max(0, settings.free_generations - user.free_used)
     return (
-        "👤 Ваш кабинет\n\n"
-        f"Бесплатно осталось: {free_left}\n"
-        f"Платных генераций: {user.paid_credits}\n"
-        f"Всего генераций: {user.total_generations}\n"
-        f"Всего оплачено Stars: {user.total_paid_stars}"
+        "👤 <b>Личный кабинет</b>\n\n"
+        f"Бесплатно осталось: <b>{free_left}</b>\n"
+        f"Платных генераций: <b>{user.paid_credits}</b>\n"
+        f"Всего генераций: <b>{user.total_generations}</b>\n"
+        f"Всего оплачено Stars: <b>{user.total_paid_stars}</b>\n"
+        f"Приглашено друзей: <b>{user.referrals_count}</b>"
     )
 
 
 async def send_main(target: Message | CallbackQuery) -> None:
     text = (
-        "🔥 <b>AziBax AI Bot</b>\n\n"
-        "Что умеет бот:\n"
-        "• менять фон\n"
-        "• менять стиль одежды\n"
+        "✨ <b>AziBax AI</b>\n\n"
+        "Премиальный AI-бот для фото-стилизации.\n\n"
+        "Что умеет:\n"
+        "• менять фон и атмосферу кадра\n"
+        "• менять стиль и образ\n"
         "• сохранять лицо максимально похожим\n"
-        "• объединять 2 фото в 1 кадр\n\n"
-        f"🎁 Бесплатно доступно: <b>{settings.free_generations}</b> генерации"
+        "• объединять 2 фото в 1 красивый кадр\n\n"
+        f"🎁 Новым пользователям доступно: <b>{settings.free_generations}</b> бесплатные генерации\n\n"
+        "Выбери действие ниже 👇"
     )
+
     if isinstance(target, Message):
         await target.answer(text, reply_markup=home_reply_kb(), parse_mode="HTML")
     else:
@@ -569,9 +626,37 @@ def cleanup_paths(paths: list[str | None]) -> None:
 
 
 @router.message(CommandStart())
-async def start_cmd(message: Message, state: FSMContext) -> None:
+async def start_cmd(
+    message: Message,
+    state: FSMContext,
+    command: CommandObject | None = None,
+) -> None:
     ensure_user_from_message(message)
     await state.clear()
+
+    start_arg = command.args if command else None
+    referral_notice = None
+
+    if start_arg and start_arg.startswith("ref_"):
+        ref_part = start_arg.replace("ref_", "").strip()
+        if ref_part.isdigit():
+            referrer_id = int(ref_part)
+            if message.from_user.id != referrer_id:
+                success = db.bind_referral(
+                    new_user_id=message.from_user.id,
+                    referrer_id=referrer_id,
+                    bonus_credits=settings.referral_bonus_credits,
+                )
+                if success:
+                    referral_notice = (
+                        "🎉 <b>Рефералка активирована</b>\n\n"
+                        "Ты зашёл по приглашению.\n"
+                        f"Пригласивший получил <b>{settings.referral_bonus_credits}</b> бонусных генераций."
+                    )
+
+    if referral_notice:
+        await message.answer(referral_notice, parse_mode="HTML")
+
     await send_main(message)
 
 
@@ -585,32 +670,22 @@ async def menu_cmd(message: Message, state: FSMContext) -> None:
 @router.message(Command("styles"))
 async def styles_cmd(message: Message) -> None:
     ensure_user_from_message(message)
-    await message.answer(style_text(), reply_markup=home_reply_kb())
+    await message.answer(style_text(), reply_markup=home_reply_kb(), parse_mode="HTML")
 
 
 @router.message(Command("cabinet"))
 async def cabinet_cmd(message: Message) -> None:
     ensure_user_from_message(message)
-    await message.answer(cabinet_text(message.from_user.id), reply_markup=home_reply_kb())
+    await message.answer(cabinet_text(message.from_user.id), reply_markup=home_reply_kb(), parse_mode="HTML")
 
 
 @router.message(Command("buy"))
 async def buy_cmd(message: Message) -> None:
     ensure_user_from_message(message)
-    await message.answer("Выбери пакет:", reply_markup=buy_kb())
-
-
-@router.message(Command("help"))
-async def help_cmd(message: Message) -> None:
-    ensure_user_from_message(message)
     await message.answer(
-        "Как пользоваться:\n"
-        "1) Нажми «Создать фото» или «Отправить фото»\n"
-        "2) Выбери режим\n"
-        "3) Выбери стиль\n"
-        "4) Отправь фото\n"
-        "5) Получи результат",
-        reply_markup=home_reply_kb(),
+        "💎 <b>Пакеты генераций</b>\n\nВыбери удобный тариф 👇",
+        reply_markup=buy_kb(),
+        parse_mode="HTML",
     )
 
 
@@ -627,15 +702,49 @@ async def cancel_cmd(message: Message, state: FSMContext) -> None:
 async def admin_stats(message: Message) -> None:
     ensure_user_from_message(message)
     if not is_admin(message.from_user.id):
+        await message.answer("Эта команда доступна только админу.")
         return
+
     s = db.stats()
     await message.answer(
-        f"📊 Статистика\n\nПользователи: {s['users']}\nГенерации: {s['generations']}\nОплачено Stars: {s['paid_stars']}"
+        f"📊 <b>Статистика</b>\n\n"
+        f"Пользователи: <b>{s['users']}</b>\n"
+        f"Генерации: <b>{s['generations']}</b>\n"
+        f"Оплачено Stars: <b>{s['paid_stars']}</b>",
+        reply_markup=home_reply_kb(),
+        parse_mode="HTML",
     )
 
 
-@router.message(F.text == "🖼 Отправить фото")
-@router.message(F.text == "✨ Создать фото")
+@router.message(Command("star_balance"))
+async def star_balance_cmd(message: Message) -> None:
+    ensure_user_from_message(message)
+
+    if not is_admin(message.from_user.id):
+        await message.answer("Эта команда доступна только админу.")
+        return
+
+    try:
+        balance = await message.bot.get_my_star_balance()
+        amount = getattr(balance, "amount", 0)
+        nanostar_amount = getattr(balance, "nanostar_amount", 0)
+
+        await message.answer(
+            "⭐ <b>Баланс Stars бота</b>\n\n"
+            f"Stars: <b>{amount}</b>\n"
+            f"NanoStars: <b>{nanostar_amount}</b>",
+            reply_markup=home_reply_kb(),
+            parse_mode="HTML",
+        )
+    except Exception as e:
+        await message.answer(
+            "Не удалось получить баланс Stars.\n\n"
+            f"Ошибка: {str(e)[:700]}",
+            reply_markup=home_reply_kb(),
+        )
+
+
+@router.message(F.text == "🖼 Создать фото")
 async def open_create_menu(message: Message, state: FSMContext) -> None:
     ensure_user_from_message(message)
     await state.clear()
@@ -651,13 +760,18 @@ async def open_create_menu(message: Message, state: FSMContext) -> None:
 @router.message(F.text == "🎨 Стили")
 async def open_styles_menu(message: Message) -> None:
     ensure_user_from_message(message)
-    await message.answer(style_text(), reply_markup=home_reply_kb())
+    await message.answer(style_text(), reply_markup=home_reply_kb(), parse_mode="HTML")
 
 
-@router.message(F.text == "💳 Купить кредиты")
+@router.message(F.text == "💳 Купить")
 async def open_buy_menu(message: Message) -> None:
     ensure_user_from_message(message)
-    await message.answer("Выбери пакет:", reply_markup=buy_kb())
+    await message.answer(
+        "✨ <b>Открой больше генераций</b>\n\n"
+        "Выбери пакет, который подходит тебе 👇",
+        reply_markup=buy_kb(),
+        parse_mode="HTML",
+    )
 
 
 @router.message(F.text == "⚡ 1 генерация")
@@ -714,61 +828,34 @@ async def buy_year_from_button(message: Message) -> None:
     )
 
 
-@router.message(Command("star_balance"))
-async def star_balance_cmd(message: Message) -> None:
-    ensure_user_from_message(message)
-
-    if not is_admin(message.from_user.id):
-        await message.answer("Эта команда доступна только админу.")
-        return
-
-    try:
-        balance = await message.bot.get_my_star_balance()
-
-        amount = getattr(balance, "amount", 0)
-        nanostar_amount = getattr(balance, "nanostar_amount", 0)
-
-        text = (
-            "⭐ Баланс Stars бота\n\n"
-            f"Stars: {amount}\n"
-            f"NanoStars: {nanostar_amount}"
-        )
-
-        await message.answer(text, reply_markup=home_reply_kb())
-    except Exception as e:
-        await message.answer(f"Не удалось получить баланс Stars:\n{str(e)[:800]}")
-
 @router.message(F.text == "💰 Баланс")
 async def balance_from_button(message: Message) -> None:
     ensure_user_from_message(message)
-    await message.answer(cabinet_text(message.from_user.id), reply_markup=home_reply_kb())
+    await message.answer(cabinet_text(message.from_user.id), reply_markup=home_reply_kb(), parse_mode="HTML")
+
+
+@router.message(F.text == "⭐ Stars баланс")
+async def stars_balance_from_button(message: Message) -> None:
+    await star_balance_cmd(message)
 
 
 @router.message(F.text == "👥 Рефералка")
 async def referral_from_button(message: Message) -> None:
     ensure_user_from_message(message)
     bot_info = await message.bot.get_me()
+    user = db.get_user(message.from_user.id)
     referral_link = f"https://t.me/{bot_info.username}?start=ref_{message.from_user.id}"
+
+    referrals_count = user.referrals_count if user else 0
+
     await message.answer(
-        "👥 Реферальная программа\n\n"
+        "👥 <b>Реферальная программа</b>\n\n"
         f"Твоя ссылка:\n{referral_link}\n\n"
-        "Потом можно добавить бонусы за приглашения.",
+        f"Ты пригласил: <b>{referrals_count}</b>\n"
+        f"Бонус за приглашение: <b>{settings.referral_bonus_credits}</b> генераций\n\n"
+        "Отправь ссылку друзьям 👇",
         reply_markup=home_reply_kb(),
-    )
-
-
-@router.message(F.text == "🔥 Идеи")
-async def ideas_from_button(message: Message) -> None:
-    ensure_user_from_message(message)
-    await message.answer(
-        "🔥 Идеи для фото:\n\n"
-        "• Dubai Luxe portrait\n"
-        "• Old money aesthetic\n"
-        "• Anime cinematic look\n"
-        "• Luxury studio portrait\n"
-        "• Couple premium photoshoot\n"
-        "• Instagram editorial style",
-        reply_markup=home_reply_kb(),
+        parse_mode="HTML",
     )
 
 
@@ -784,7 +871,7 @@ async def back_menu(call: CallbackQuery, state: FSMContext) -> None:
 async def show_styles(call: CallbackQuery) -> None:
     ensure_user_from_callback(call)
     if call.message:
-        await call.message.edit_text(style_text(), reply_markup=main_menu_kb())
+        await call.message.edit_text(style_text(), reply_markup=main_menu_kb(), parse_mode="HTML")
     await call.answer()
 
 
@@ -792,7 +879,7 @@ async def show_styles(call: CallbackQuery) -> None:
 async def show_cabinet(call: CallbackQuery) -> None:
     ensure_user_from_callback(call)
     if call.message:
-        await call.message.edit_text(cabinet_text(call.from_user.id), reply_markup=main_menu_kb())
+        await call.message.edit_text(cabinet_text(call.from_user.id), reply_markup=main_menu_kb(), parse_mode="HTML")
     await call.answer()
 
 
@@ -800,7 +887,11 @@ async def show_cabinet(call: CallbackQuery) -> None:
 async def buy_menu(call: CallbackQuery) -> None:
     ensure_user_from_callback(call)
     if call.message:
-        await call.message.edit_text("Выбери пакет:", reply_markup=buy_kb())
+        await call.message.edit_text(
+            "💎 <b>Пакеты генераций</b>\n\nВыбери удобный тариф 👇",
+            reply_markup=buy_kb(),
+            parse_mode="HTML",
+        )
     await call.answer()
 
 
@@ -861,15 +952,12 @@ async def process_generation(message: Message, state: FSMContext, paths: list[st
 
     data = await state.get_data()
     style = data["style"]
-
-    if is_admin(user_id):
-        source = "admin"
-    else:
-        source = db.consume_generation(user_id)
+    source = "admin" if is_admin(user_id) else db.consume_generation(user_id)
 
     async with lock:
         await message.answer("🪄 Генерирую фото... Это может занять немного времени.")
         result_path: Path | None = None
+
         try:
             if len(paths) == 1:
                 image_bytes = await image_service.stylize_person(paths[0], style)
@@ -882,10 +970,12 @@ async def process_generation(message: Message, state: FSMContext, paths: list[st
             await message.answer_photo(
                 FSInputFile(result_path),
                 caption=(
-                    f"Готово ✅\nСтиль: {STYLE_PRESETS[style].title}\n\n"
+                    f"✅ <b>Готово</b>\n"
+                    f"Стиль: <b>{STYLE_PRESETS[style].title}</b>\n\n"
                     f"{cabinet_text(user_id)}"
                 ),
                 reply_markup=home_reply_kb(),
+                parse_mode="HTML",
             )
 
         except Exception as e:
@@ -895,9 +985,10 @@ async def process_generation(message: Message, state: FSMContext, paths: list[st
 
             err_text = str(e)[:800]
             await message.answer(
-                "Не удалось сгенерировать изображение.\n\n"
+                "⚠️ <b>Не удалось сгенерировать фото</b>\n\n"
                 f"Техническая ошибка:\n{err_text}",
                 reply_markup=home_reply_kb(),
+                parse_mode="HTML",
             )
 
             for admin_id in settings.admin_ids:
@@ -951,6 +1042,7 @@ async def wrong_content(message: Message) -> None:
 @router.callback_query(F.data.startswith("invoice:"))
 async def send_invoice_handler(call: CallbackQuery) -> None:
     ensure_user_from_callback(call)
+
     if is_admin(call.from_user.id):
         await call.answer("Ты админ. У тебя безлимитный тестовый режим.", show_alert=True)
         return
@@ -1006,8 +1098,11 @@ async def successful_payment(message: Message) -> None:
         return
 
     await message.answer(
-        f"Оплата прошла ✅\n\nДобавлено генераций: {int(plan['credits'])}\n\n{cabinet_text(message.from_user.id)}",
+        f"✅ <b>Оплата прошла успешно</b>\n\n"
+        f"Добавлено генераций: <b>{int(plan['credits'])}</b>\n\n"
+        f"{cabinet_text(message.from_user.id)}",
         reply_markup=home_reply_kb(),
+        parse_mode="HTML",
     )
 
 
